@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rotating Aircraft Tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body, html { margin: 0; height: 100%; }
+    #map { height: 100vh; }
+    #controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(255,255,255,0.9);
+      padding: 10px;
+      z-index: 1000;
+      border-radius: 6px;
+      font-family: sans-serif;
+    }
+    input, button {
+      padding: 5px;
+      margin: 5px 0;
+      width: 180px;
+    }
+    ul { list-style: none; padding: 0; }
+    li {
+      margin-top: 5px;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    li button {
+      width: auto;
+      margin-left: 10px;
+      padding: 2px 6px;
+    }
+    .leaflet-marker-icon.rotated {
+      transform-origin: center center;
+    }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <input type="text" id="aircraftInput" placeholder="Callsign or ICAO (hex)" />
+    <button onclick="addAircraft()">Add Aircraft</button>
+    <div id="trackedList"><strong>Tracking:</strong><ul id="aircraftList"></ul></div>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([37.5, -95], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18
+    }).addTo(map);
+
+    const trackedAircraft = {}; // id: { marker, trail, path[], listItem }
+
+    const airplaneIconUrl = 'airplane_token.png';
+
+    function createRotatedIcon(angle) {
+      return L.divIcon({
+        className: '',
+        html: `<img src="${airplaneIconUrl}" style="width:32px; transform: rotate(${angle}deg);" class="rotated" />`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+    }
+
+    function addAircraft() {
+      const id = document.getElementById("aircraftInput").value.trim().toLowerCase();
+      if (!id || trackedAircraft[id]) return;
+
+      trackedAircraft[id] = { path: [], marker: null, trail: null };
+
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${id.toUpperCase()}</span> <button onclick="removeAircraft('${id}')">Stop</button>`;
+      document.getElementById("aircraftList").appendChild(li);
+      trackedAircraft[id].listItem = li;
+
+      document.getElementById("aircraftInput").value = '';
+    }
+
+    function removeAircraft(id) {
+      if (trackedAircraft[id]) {
+        if (trackedAircraft[id].marker) map.removeLayer(trackedAircraft[id].marker);
+        if (trackedAircraft[id].trail) map.removeLayer(trackedAircraft[id].trail);
+        if (trackedAircraft[id].listItem) trackedAircraft[id].listItem.remove();
+        delete trackedAircraft[id];
+      }
+    }
+
+    async function updateAircraft() {
+      const response = await fetch("https://opensky-network.org/api/states/all");
+      if (!response.ok) return;
+
+      const data = await response.json();
+      const states = data.states;
+
+      if (!states) return;
+
+      states.forEach(aircraft => {
+        const icao = aircraft[0].toLowerCase();
+        const callsign = (aircraft[1] || "").trim().toLowerCase();
+        const lon = aircraft[5];
+        const lat = aircraft[6];
+        const heading = aircraft[10]; // Track angle in degrees
+
+        if (!lat || !lon) return;
+
+        for (let id in trackedAircraft) {
+          if (id === icao || id === callsign) {
+            const info = trackedAircraft[id];
+
+            info.path.push([lat, lon]);
+
+            if (!info.marker) {
+              info.marker = L.marker([lat, lon], {
+                icon: createRotatedIcon(heading || 0)
+              }).addTo(map).bindPopup(id.toUpperCase());
+
+              info.trail = L.polyline(info.path, { color: 'blue' }).addTo(map);
+            } else {
+              info.marker.setLatLng([lat, lon]);
+              info.marker.setIcon(createRotatedIcon(heading || 0));
+              info.trail.setLatLngs(info.path);
+            }
+          }
+        }
+      });
+    }
+
+    setInterval(updateAircraft, 10000); // update every 10 seconds
+    updateAircraft();
+  </script>
+</body>
+</html>
