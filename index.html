@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Rotating Aircraft Tracker</title>
+  <title>Rotating Aircraft Tracker with Info</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
@@ -32,8 +32,7 @@
       align-items: center;
     }
     li button {
-      width: auto;
-      margin-left: 10px;
+      margin-left: 5px;
       padding: 2px 6px;
     }
     .leaflet-marker-icon.rotated {
@@ -59,6 +58,7 @@
     const trackedAircraft = {}; // id: { marker, trail, path[], listItem }
 
     const airplaneIconUrl = 'airplane_token.png';
+    let centeredAircraftId = null;
 
     function createRotatedIcon(angle) {
       return L.divIcon({
@@ -76,7 +76,13 @@
       trackedAircraft[id] = { path: [], marker: null, trail: null };
 
       const li = document.createElement("li");
-      li.innerHTML = `<span>${id.toUpperCase()}</span> <button onclick="removeAircraft('${id}')">Stop</button>`;
+      li.innerHTML = `
+        <span>${id.toUpperCase()}</span>
+        <div>
+          <button onclick="centerOnAircraft('${id}')">Center</button>
+          <button onclick="removeAircraft('${id}')">Stop</button>
+        </div>
+      `;
       document.getElementById("aircraftList").appendChild(li);
       trackedAircraft[id].listItem = li;
 
@@ -89,7 +95,22 @@
         if (trackedAircraft[id].trail) map.removeLayer(trackedAircraft[id].trail);
         if (trackedAircraft[id].listItem) trackedAircraft[id].listItem.remove();
         delete trackedAircraft[id];
+        if (centeredAircraftId === id) centeredAircraftId = null;
       }
+    }
+
+    function centerOnAircraft(id) {
+      centeredAircraftId = id;
+    }
+
+    function formatPopupData(icao, callsign, lat, lon, alt, speed, heading) {
+      return `
+        <b>${callsign || icao.toUpperCase()}</b><br/>
+        Lat: ${lat.toFixed(5)} &nbsp;&nbsp; Lon: ${lon.toFixed(5)}<br/>
+        Altitude: ${alt !== null ? alt.toFixed(0) + ' m' : 'N/A'}<br/>
+        Speed: ${speed !== null ? speed.toFixed(1) + ' m/s' : 'N/A'}<br/>
+        Heading: ${heading !== null ? heading.toFixed(0) + '°' : 'N/A'}
+      `;
     }
 
     async function updateAircraft() {
@@ -98,41 +119,48 @@
 
       const data = await response.json();
       const states = data.states;
-
       if (!states) return;
 
       states.forEach(aircraft => {
         const icao = aircraft[0].toLowerCase();
-        const callsign = (aircraft[1] || "").trim().toLowerCase();
+        const callsignRaw = (aircraft[1] || "").trim();
+        const callsign = callsignRaw.toLowerCase();
         const lon = aircraft[5];
         const lat = aircraft[6];
-        const heading = aircraft[10]; // Track angle in degrees
+        const alt = aircraft[7];    // altitude in meters
+        const speed = aircraft[9];  // velocity in m/s
+        const heading = aircraft[10]; // track angle in degrees
 
         if (!lat || !lon) return;
 
         for (let id in trackedAircraft) {
           if (id === icao || id === callsign) {
             const info = trackedAircraft[id];
-
             info.path.push([lat, lon]);
+
+            const popupContent = formatPopupData(icao, callsignRaw, lat, lon, alt, speed, heading);
 
             if (!info.marker) {
               info.marker = L.marker([lat, lon], {
                 icon: createRotatedIcon(heading || 0)
-              }).addTo(map).bindPopup(id.toUpperCase());
-
+              }).addTo(map).bindPopup(popupContent);
               info.trail = L.polyline(info.path, { color: 'blue' }).addTo(map);
             } else {
               info.marker.setLatLng([lat, lon]);
               info.marker.setIcon(createRotatedIcon(heading || 0));
+              info.marker.getPopup().setContent(popupContent);
               info.trail.setLatLngs(info.path);
+            }
+
+            if (centeredAircraftId === id) {
+              map.setView([lat, lon]);
             }
           }
         }
       });
     }
 
-    setInterval(updateAircraft, 10000); // update every 10 seconds
+    setInterval(updateAircraft, 10000);
     updateAircraft();
   </script>
 </body>
