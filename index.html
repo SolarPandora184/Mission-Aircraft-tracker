@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Global Aircraft Tracker</title>
+  <title>Aircraft Tracker with Persistent Alarm</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
@@ -17,11 +17,12 @@
       z-index: 1000;
       border-radius: 6px;
       font-family: sans-serif;
+      max-width: 250px;
     }
     input, button {
       padding: 5px;
       margin: 5px 0;
-      width: 180px;
+      width: 100%;
     }
     ul { list-style: none; padding: 0; }
     li {
@@ -35,8 +36,20 @@
       margin-left: 5px;
       padding: 2px 6px;
     }
-    .leaflet-marker-icon.rotated {
-      transform-origin: center center;
+    #alarmOverlay {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(255, 0, 0, 0.5);
+      pointer-events: none;
+      z-index: 2000;
+      display: none;
+      animation: flash 1s infinite;
+    }
+    @keyframes flash {
+      0% { opacity: 0.5; }
+      50% { opacity: 0.9; }
+      100% { opacity: 0.5; }
     }
   </style>
 </head>
@@ -44,9 +57,14 @@
   <div id="controls">
     <input type="text" id="aircraftInput" placeholder="Callsign or ICAO (hex)" />
     <button onclick="addAircraft()">Add Aircraft</button>
-    <div id="trackedList"><strong>Tracking:</strong><ul id="aircraftList"></ul></div>
+    <button onclick="toggleOtherAircraft()">Toggle Other Aircraft</button>
+    <button onclick="clearZone()">Clear Zone</button>
+    <button onclick="silenceAlarm()" style="background: red; color: white;">Silence Alarm</button>
+    <div><strong>Tracking:</strong><ul id="aircraftList"></ul></div>
   </div>
   <div id="map"></div>
+  <div id="alarmOverlay"></div>
+  <audio id="alarmSound" src="warning_sound.mp3" preload="auto" loop></audio>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
@@ -55,12 +73,53 @@
       maxZoom: 18
     }).addTo(map);
 
-    const trackedAircraft = {}; // id: { marker, trail, path[], listItem }
-    const otherMarkers = new Map(); // id -> Leaflet marker
+    const trackedAircraft = {};
+    const otherMarkers = new Map();
+    let otherAircraftVisible = true;
+    let centeredAircraftId = null;
 
     const airplaneIconUrl = 'airplane_token.png';
     const otherPlaneIconUrl = 'other-plane-token.png';
-    let centeredAircraftId = null;
+    const alarmSound = document.getElementById("alarmSound");
+    const alarmOverlay = document.getElementById("alarmOverlay");
+    let alarmActive = false;
+    let alarmSilenced = false;
+    let lastIntruders = new Set();
+
+    const zonePoints = [];
+    let zonePolygon = null;
+    map.on('click', e => {
+      zonePoints.push(e.latlng);
+      if (zonePolygon) {
+        zonePolygon.setLatLngs(zonePoints);
+      } else {
+        zonePolygon = L.polygon(zonePoints, { color: 'red' }).addTo(map);
+      }
+    });
+
+    function clearZone() {
+      zonePoints.length = 0;
+      if (zonePolygon) {
+        map.removeLayer(zonePolygon);
+        zonePolygon = null;
+      }
+    }
+
+    function silenceAlarm() {
+      alarmSound.pause();
+      alarmOverlay.style.display = 'none';
+      alarmActive = false;
+      alarmSilenced = true;
+    }
+
+    function triggerAlarm(id) {
+      if (!alarmActive && !alarmSilenced) {
+        alarmSound.play();
+        alarmOverlay.style.display = 'block';
+        alarmActive = true;
+      }
+      lastIntruders.add(id);
+    }
 
     function createRotatedIcon(angle) {
       return L.divIcon({
@@ -95,7 +154,6 @@
       `;
       document.getElementById("aircraftList").appendChild(li);
       trackedAircraft[id].listItem = li;
-
       document.getElementById("aircraftInput").value = '';
     }
 
@@ -113,85 +171,75 @@
       centeredAircraftId = id;
     }
 
-    function formatPopupData(icao, callsign, lat, lon, alt, speed, heading) {
-      return `
-        <b>${callsign || icao.toUpperCase()}</b><br/>
-        Lat: ${lat.toFixed(5)} &nbsp;&nbsp; Lon: ${lon.toFixed(5)}<br/>
-        Altitude: ${alt !== null ? alt.toFixed(0) + ' m' : 'N/A'}<br/>
-        Speed: ${speed !== null ? speed.toFixed(1) + ' m/s' : 'N/A'}<br/>
-        Heading: ${heading !== null ? heading.toFixed(0) + '°' : 'N/A'}
-      `;
+    function toggleOtherAircraft() {
+      otherAircraftVisible = !otherAircraftVisible;
+      for (const marker of otherMarkers.values()) {
+        if (otherAircraftVisible) map.addLayer(marker);
+        else map.removeLayer(marker);
+      }
     }
 
     async function updateAircraft() {
-      const response = await fetch("https://opensky-network.org/api/states/all");
-      if (!response.ok) return;
-
-      const data = await response.json();
-      const states = data.states;
-      if (!states) return;
-
+      const res = await fetch("https://opensky-network.org/api/states/all");
+      if (!res.ok) return;
+      const data = await res.json();
+      const states = data.states || [];
       const bounds = map.getBounds();
       const foundUntracked = new Set();
 
-      states.forEach(aircraft => {
-        const icao = aircraft[0].toLowerCase();
-        const callsignRaw = (aircraft[1] || "").trim();
+      states.forEach(ac => {
+        const icao = ac[0].toLowerCase();
+        const callsignRaw = (ac[1] || '').trim();
         const callsign = callsignRaw.toLowerCase();
-        const lon = aircraft[5];
-        const lat = aircraft[6];
-        const alt = aircraft[7];
-        const speed = aircraft[9];
-        const heading = aircraft[10];
+        const lat = ac[6];
+        const lon = ac[5];
+        const alt = ac[7];
+        const spd = ac[9];
+        const hdg = ac[10];
 
         if (!lat || !lon) return;
         const pos = [lat, lon];
 
-        // Tracked aircraft
         for (let id in trackedAircraft) {
           if (id === icao || id === callsign) {
             const info = trackedAircraft[id];
             info.path.push(pos);
-
-            const popupContent = formatPopupData(icao, callsignRaw, lat, lon, alt, speed, heading);
-
+            const popup = `<b>${callsignRaw || icao.toUpperCase()}</b><br/>Lat: ${lat.toFixed(5)}, Lon: ${lon.toFixed(5)}<br/>Alt: ${alt}m, Spd: ${spd}m/s, Hdg: ${hdg}°`;
             if (!info.marker) {
-              info.marker = L.marker(pos, {
-                icon: createRotatedIcon(heading || 0)
-              }).addTo(map).bindPopup(popupContent);
+              info.marker = L.marker(pos, { icon: createRotatedIcon(hdg || 0) }).addTo(map).bindPopup(popup);
               info.trail = L.polyline(info.path, { color: 'blue' }).addTo(map);
             } else {
               info.marker.setLatLng(pos);
-              info.marker.setIcon(createRotatedIcon(heading || 0));
-              info.marker.getPopup().setContent(popupContent);
+              info.marker.setIcon(createRotatedIcon(hdg || 0));
+              info.marker.getPopup().setContent(popup);
               info.trail.setLatLngs(info.path);
             }
-
-            if (centeredAircraftId === id) {
-              map.setView(pos);
-            }
-
+            if (centeredAircraftId === id) map.setView(pos);
             return;
           }
         }
 
-        // Untracked aircraft within view
         if (bounds.contains(pos)) {
           foundUntracked.add(icao);
           if (!otherMarkers.has(icao)) {
-            const marker = L.marker(pos, { icon: createOtherIcon() }).addTo(map);
+            const marker = L.marker(pos, { icon: createOtherIcon() });
             otherMarkers.set(icao, marker);
-          } else {
-            otherMarkers.get(icao).setLatLng(pos);
+            if (otherAircraftVisible) marker.addTo(map);
+          } else otherMarkers.get(icao).setLatLng(pos);
+
+          if (zonePolygon && zonePolygon.getBounds().contains(pos)) {
+            if (!lastIntruders.has(icao)) {
+              triggerAlarm(icao);
+            }
           }
         }
       });
 
-      // Remove stale untracked markers
       for (const [id, marker] of otherMarkers.entries()) {
         if (!foundUntracked.has(id)) {
           map.removeLayer(marker);
           otherMarkers.delete(id);
+          lastIntruders.delete(id);
         }
       }
     }
