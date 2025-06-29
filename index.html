@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Rotating Aircraft Tracker with Info</title>
+  <title>Global Aircraft Tracker</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
@@ -56,8 +56,10 @@
     }).addTo(map);
 
     const trackedAircraft = {}; // id: { marker, trail, path[], listItem }
+    const otherMarkers = new Map(); // id -> Leaflet marker
 
     const airplaneIconUrl = 'airplane_token.png';
+    const otherPlaneIconUrl = 'other-plane-token.png';
     let centeredAircraftId = null;
 
     function createRotatedIcon(angle) {
@@ -66,6 +68,14 @@
         html: `<img src="${airplaneIconUrl}" style="width:32px; transform: rotate(${angle}deg);" class="rotated" />`,
         iconSize: [32, 32],
         iconAnchor: [16, 16]
+      });
+    }
+
+    function createOtherIcon() {
+      return L.icon({
+        iconUrl: otherPlaneIconUrl,
+        iconSize: [12, 12],
+        iconAnchor: [6, 6]
       });
     }
 
@@ -121,43 +131,69 @@
       const states = data.states;
       if (!states) return;
 
+      const bounds = map.getBounds();
+      const foundUntracked = new Set();
+
       states.forEach(aircraft => {
         const icao = aircraft[0].toLowerCase();
         const callsignRaw = (aircraft[1] || "").trim();
         const callsign = callsignRaw.toLowerCase();
         const lon = aircraft[5];
         const lat = aircraft[6];
-        const alt = aircraft[7];    // altitude in meters
-        const speed = aircraft[9];  // velocity in m/s
-        const heading = aircraft[10]; // track angle in degrees
+        const alt = aircraft[7];
+        const speed = aircraft[9];
+        const heading = aircraft[10];
 
         if (!lat || !lon) return;
+        const pos = [lat, lon];
 
+        // Tracked aircraft
         for (let id in trackedAircraft) {
           if (id === icao || id === callsign) {
             const info = trackedAircraft[id];
-            info.path.push([lat, lon]);
+            info.path.push(pos);
 
             const popupContent = formatPopupData(icao, callsignRaw, lat, lon, alt, speed, heading);
 
             if (!info.marker) {
-              info.marker = L.marker([lat, lon], {
+              info.marker = L.marker(pos, {
                 icon: createRotatedIcon(heading || 0)
               }).addTo(map).bindPopup(popupContent);
               info.trail = L.polyline(info.path, { color: 'blue' }).addTo(map);
             } else {
-              info.marker.setLatLng([lat, lon]);
+              info.marker.setLatLng(pos);
               info.marker.setIcon(createRotatedIcon(heading || 0));
               info.marker.getPopup().setContent(popupContent);
               info.trail.setLatLngs(info.path);
             }
 
             if (centeredAircraftId === id) {
-              map.setView([lat, lon]);
+              map.setView(pos);
             }
+
+            return;
+          }
+        }
+
+        // Untracked aircraft within view
+        if (bounds.contains(pos)) {
+          foundUntracked.add(icao);
+          if (!otherMarkers.has(icao)) {
+            const marker = L.marker(pos, { icon: createOtherIcon() }).addTo(map);
+            otherMarkers.set(icao, marker);
+          } else {
+            otherMarkers.get(icao).setLatLng(pos);
           }
         }
       });
+
+      // Remove stale untracked markers
+      for (const [id, marker] of otherMarkers.entries()) {
+        if (!foundUntracked.has(id)) {
+          map.removeLayer(marker);
+          otherMarkers.delete(id);
+        }
+      }
     }
 
     setInterval(updateAircraft, 10000);
